@@ -156,25 +156,9 @@
             </intent-filter>
         </activity>
 
-        <activity android:name="com.microsoft.identity.client.BrowserTabActivity" android:exported="true">
-        
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
 
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
 
-                <data
-                    android:host="com.yours.yourcallyourrule"
-                    android:path="/vTPqTKTC03RK8cQfxyK0j3CRkJs="
-                    android:scheme="msauth" />
-           </intent-filter>
-        </activity>
 
-        <activity
-            android:name="com.yalantis.ucrop.UCropActivity"
-            android:screenOrientation="portrait"
-            android:theme="@style/Theme.AppCompat.Light.NoActionBar" />
 
         <!--  ===  Flutter Activity  ===  -->
         <activity
@@ -185,70 +169,11 @@
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
 
-        <!--  ===  Call Screening Service  ===  -->
-        <service
-            android:name=".MyCallScreeningService"
-            android:permission="android.permission.BIND_SCREENING_SERVICE"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.telecom.CallScreeningService" />
-                <category android:name="android.intent.category.DEFAULT" />
-            </intent-filter>
-        </service>
-
-        <!--  ===  IN Call Service  ===  -->
-        <service android:name=".MyInCallService"
-            android:exported="true"
-            android:permission="android.permission.BIND_INCALL_SERVICE">
-            <meta-data android:name="android.telecom.IN_CALL_SERVICE_UI" android:value="true" />
-            <intent-filter>
-                <action android:name="android.telecom.InCallService"/>
-            </intent-filter>
-        </service>
 
 
 
-        <!--  ===  overlay callerid display  ===  -->
-        <service android:name="flutter.overlay.window.flutter_overlay_window.OverlayService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="overlay_for_callerid_window"/>
-        </service>
 
-        <!--  ===  Flutter Local Notification  ===  -->
-        <service
-            android:name="com.dexterous.flutterlocalnotifications.ForegroundService"        
-            android:exported="false"
-            android:stopWithTask="false"/>
 
-        <!--  ===  Call Receiver  ===  -->
-        <receiver android:name=".CallStateReceiver" android:exported="true">
-            <intent-filter>
-            <action android:name="android.intent.action.PHONE_STATE" />
-        </intent-filter>
-        </receiver>
-
-        <!--  ===  SMS Receiver  ===  -->
-        <receiver
-            android:name=".SmsReceiver"
-            android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
-            <intent-filter>
-                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
-            </intent-filter>
-        </receiver>
-
-        <!--  ===  Flutter Local Notification  ===  -->
-        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver" />
-        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationReceiver" />
-        <receiver android:exported="false" android:name="com.dexterous.flutterlocalnotifications.ScheduledNotificationBootReceiver">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
-                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
-            </intent-filter>
-        </receiver>
         
         <meta-data
             android:name="flutterEmbedding"
