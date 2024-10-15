@@ -1,10 +1,10 @@
-name: debug Flutter Build, Sign and Release
+name: Caxhed Flutter Build, Sign and Release
 
 on:
   workflow_dispatch:
   #push:
   #  branches:
-  #    - main
+   #   - main
 
 jobs:
   build:
@@ -19,53 +19,42 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
-
+                
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.24.0' 
           channel: 'stable'
-          cache: true
+          cache: true 
           cache-key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
-
+          
       - run: flutter pub get
-      
-      # Cache Gradle dependencies
-      - name: Cache Gradle Dependencies
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
       - name: Flutter Doctor
         run: flutter doctor -v
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools build-tools;34.0.0
+          packages: platform-tools
 
 
 
-      # Build and Sign AAB and APKs using Flutter's built-in signing
-      - name: Build and Sign AAB and APKs
-        run: |
-          flutter build appbundle -v 
-          flutter build apk --split-per-abi
-
-      # Cache Flutter build files
-      - name: Cache Flutter Build Files
+      # Cache build artifacts
+      - name: Cache Build Artifacts
         uses: actions/cache@v3
         with:
           path: |
-            build
-            .dart_tool
+            build/app/outputs/bundle/release/app-release.aab
+            build/app/outputs/apk/release/*.apk
           key: ${{ runner.os }}-flutter-build-${{ hashFiles('**/pubspec.yaml') }}
           restore-keys: |
             ${{ runner.os }}-flutter-build-
+
+      # Build and Sign AAB and APKs using Flutter's built-in signing (with caching)
+      - name: Build and Sign AAB and APKs
+        if: steps.cache-build-artifacts.outputs.cache-hit != 'true' # Only build if cache miss
+        run: |
+          flutter build appbundle -v 
+          flutter build apk --split-per-abi
 
       # Upload signed AAB and APKs as artifacts
       - name: Upload Signed Artifacts
@@ -79,17 +68,3 @@ jobs:
       - name: Extract pubspec version
         run: |
           echo "PUBSPEC_VERSION=$(grep -oP 'version:\s*\K[^+]+(?=\+)' pubspec.yaml)" >> $GITHUB_ENV
-
-      - name: Upload Release 
-        uses: ncipollo/release-action@v1
-        with:
-          token: ${{ secrets.MY_PAT }}
-          tag: v${{ env.PUBSPEC_VERSION }} 
-          omitBodyDuringUpdate: true
-          omitNameDuringUpdate: true
-          omitPrereleaseDuringUpdate: true
-          allowUpdates: true
-          artifacts: |
-            signed-release-artifacts/*
-            build/app/outputs/bundle/release/app-release.aab
-            build/app/outputs/apk/release/*.apk
