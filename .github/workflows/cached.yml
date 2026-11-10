@@ -77,11 +77,11 @@ jobs:
               up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
               return up_flow.reshape(N, 2, self.scale * H, self.scale * W)
 
-          class D2DewarpSingleOutput(nn.Module):
-              def __init__(self, base_model):
+          class D2DewarpExportWrapper(nn.Module):
+              def __init__(self, base_model: nn.Module):
                   super().__init__()
                   self.base_model = base_model
-              def forward(self, x):
+              def forward(self, x: torch.Tensor):
                   _, _, bm_up = self.base_model(x)
                   return bm_up
 
@@ -95,6 +95,8 @@ jobs:
               args = parser.parse_args()
 
               print(f"[*] Loading PyTorch weights from {args.weight_path}...")
+              print(f"[*] File size on disk: {os.path.getsize(args.weight_path) / (1024 * 1024):.2f} MB")
+
               try:
                   ckpt = torch.load(args.weight_path, map_location='cpu', weights_only=False)
               except Exception:
@@ -107,40 +109,59 @@ jobs:
               state_dict = ckpt.get('state_dict', ckpt)
               cleaned = {k.replace('module.', ''): v for k, v in state_dict.items()}
 
-              base_model = D2DewarpModel(img_size=args.input_size, in_chans=4, hv_out_chans=1, d_model=args.d_model)
+              total_floats = sum(p.numel() for p in cleaned.values())
+              print(f"[✓] Checkpoint loaded: {len(cleaned)} tensors, {total_floats:,} scalar parameters (raw FP32: {(total_floats*4)/(1024*1024):.2f} MB)")
+
+              if "conv3x3_1.0.weight" in cleaned:
+                  d_model = cleaned["conv3x3_1.0.weight"].shape[0]
+              else:
+                  d_model = args.d_model
+
+              print(f"[*] Building D2DewarpModel with d_model={d_model}...")
+              base_model = D2DewarpModel(img_size=args.input_size, in_chans=4, hv_out_chans=1, d_model=d_model)
               base_model.load_state_dict(cleaned, strict=True)
               base_model.eval()
 
               import types
               base_model.dewarp_up.upsample_flow = types.MethodType(onnx_compatible_upsample_flow, base_model.dewarp_up)
 
-              wrapper = D2DewarpSingleOutput(base_model)
+              wrapper = D2DewarpExportWrapper(base_model)
               wrapper.eval()
 
               dummy_input = torch.randn(1, 4, args.input_size, args.input_size, dtype=torch.float32)
 
-              print(f"[*] Exporting single-output ONNX to {args.output_path} (do_constant_folding=False)...")
+              print(f"[*] Exporting ONNX to {args.output_path}...")
               torch.onnx.export(
                   wrapper, dummy_input, args.output_path,
                   export_params=True, opset_version=args.opset,
                   do_constant_folding=False,
                   input_names=['input_rgb_edge'], output_names=['backward_mapping'],
               )
-              print(f"[✓] Successfully exported {args.output_path}")
+              out_mb = os.path.getsize(args.output_path) / (1024 * 1024)
+              print(f"[✓] Successfully exported {args.output_path} ({out_mb:.2f} MB)")
 
           if __name__ == '__main__':
-              try:
-                  export()
-              except Exception:
-                  import traceback
-                  traceback.print_exc()
-                  sys.exit(1)
+              export()
           EOF
 
           python export_onnx.py --weight_path model_weight.pt --output_path d2dewarp.onnx
           ls -lh d2dewarp.onnx
 
-      - name: 7. Upload Artifact
+      - name: 7. Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: d2dewarp-cvpr2026-v1.0.0
+          name: "D2Dewarp ONNX Model Weights (CVPR 2026)"
+          body: |
+            ## D2Dewarp ONNX Model Weights
+            - **Paper**: D2Dewarp: Dual Dimensions Geometric Representation Learning Based Document Image Dewarping (CVPR 2026)
+            - **Input**: `input_rgb_edge` `[batch, 4, 448, 448]`
+            - **Output**: `backward_mapping` `[batch, 2, 448, 448]`
+          files: d2dewarp.onnx
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 8. Upload Artifact Backup
         uses: actions/upload-artifact@v4
         with:
           name: d2dewarp-onnx
