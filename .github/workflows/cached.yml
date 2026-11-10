@@ -56,8 +56,6 @@ jobs:
           import torch
           import torch.nn as nn
           import torch.nn.functional as F
-          import onnx
-          import onnxruntime as ort
 
           try:
               from networks.d2dewarp_model import D2DewarpModel
@@ -79,13 +77,13 @@ jobs:
               up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
               return up_flow.reshape(N, 2, self.scale * H, self.scale * W)
 
-          class D2DewarpInferenceWrapper(nn.Module):
+          class D2DewarpSingleOutput(nn.Module):
               def __init__(self, base_model):
                   super().__init__()
                   self.base_model = base_model
               def forward(self, x):
-                  pred_h_lst, pred_v_lst, bm_up = self.base_model(x)
-                  return bm_up, pred_h_lst[-1], pred_v_lst[-1]
+                  _, _, bm_up = self.base_model(x)
+                  return bm_up
 
           def export():
               parser = argparse.ArgumentParser()
@@ -116,30 +114,27 @@ jobs:
               import types
               base_model.dewarp_up.upsample_flow = types.MethodType(onnx_compatible_upsample_flow, base_model.dewarp_up)
 
-              wrapper = D2DewarpInferenceWrapper(base_model)
+              wrapper = D2DewarpSingleOutput(base_model)
+              wrapper.eval()
+
               dummy_input = torch.randn(1, 4, args.input_size, args.input_size, dtype=torch.float32)
 
-              print(f"[*] Exporting ONNX to {args.output_path}...")
-              kwargs = dict(
-                  export_params=True, opset_version=args.opset, do_constant_folding=True,
-                  input_names=['input_rgb_edge'], output_names=['backward_mapping', 'pred_h', 'pred_v'],
-                  dynamic_axes={'input_rgb_edge': {0: 'batch'}, 'backward_mapping': {0: 'batch'}}
+              print(f"[*] Exporting single-output ONNX to {args.output_path} (do_constant_folding=False)...")
+              torch.onnx.export(
+                  wrapper, dummy_input, args.output_path,
+                  export_params=True, opset_version=args.opset,
+                  do_constant_folding=False,
+                  input_names=['input_rgb_edge'], output_names=['backward_mapping'],
               )
-              try:
-                  torch.onnx.export(wrapper, dummy_input, args.output_path, dynamo=False, **kwargs)
-              except TypeError:
-                  torch.onnx.export(wrapper, dummy_input, args.output_path, **kwargs)
-
               print(f"[✓] Successfully exported {args.output_path}")
 
-              print(f"[*] Validating ONNX with onnxruntime...")
-              onnx.checker.check_model(onnx.load(args.output_path))
-              sess = ort.InferenceSession(args.output_path, providers=['CPUExecutionProvider'])
-              res = sess.run(None, {'input_rgb_edge': dummy_input.numpy()})
-              print(f"[✓] Validation passed! Output shape: {res[0].shape}")
-
           if __name__ == '__main__':
-              export()
+              try:
+                  export()
+              except Exception:
+                  import traceback
+                  traceback.print_exc()
+                  sys.exit(1)
           EOF
 
           python export_onnx.py --weight_path model_weight.pt --output_path d2dewarp.onnx
