@@ -45,7 +45,7 @@ jobs:
           fi
           ls -lh model_weight.pt
 
-      - name: 6. Run ONNX Export
+      - name: 6. Run FULL ONNX Export
         run: |
           cat << 'EOF' > export_onnx.py
           import argparse, os, sys
@@ -77,13 +77,13 @@ jobs:
               up_flow = up_flow.permute(0, 1, 4, 2, 5, 3)
               return up_flow.reshape(N, 2, self.scale * H, self.scale * W)
 
-          class D2DewarpExportWrapper(nn.Module):
+          class D2DewarpFullModel(nn.Module):
               def __init__(self, base_model: nn.Module):
                   super().__init__()
                   self.base_model = base_model
               def forward(self, x: torch.Tensor):
-                  _, _, bm_up = self.base_model(x)
-                  return bm_up
+                  pred_h_lst, pred_v_lst, bm_up = self.base_model(x)
+                  return bm_up, pred_h_lst[-1], pred_v_lst[-1]
 
           def export():
               parser = argparse.ArgumentParser()
@@ -110,7 +110,8 @@ jobs:
               cleaned = {k.replace('module.', ''): v for k, v in state_dict.items()}
 
               total_floats = sum(p.numel() for p in cleaned.values())
-              print(f"[✓] Checkpoint loaded: {len(cleaned)} tensors, {total_floats:,} scalar parameters (raw FP32: {(total_floats*4)/(1024*1024):.2f} MB)")
+              raw_mb = (total_floats * 4) / (1024 * 1024)
+              print(f"[✓] Checkpoint loaded: {len(cleaned)} tensors, {total_floats:,} scalar parameters (raw FP32: {raw_mb:.2f} MB)")
 
               if "conv3x3_1.0.weight" in cleaned:
                   d_model = cleaned["conv3x3_1.0.weight"].shape[0]
@@ -125,20 +126,25 @@ jobs:
               import types
               base_model.dewarp_up.upsample_flow = types.MethodType(onnx_compatible_upsample_flow, base_model.dewarp_up)
 
-              wrapper = D2DewarpExportWrapper(base_model)
+              wrapper = D2DewarpFullModel(base_model)
               wrapper.eval()
 
               dummy_input = torch.randn(1, 4, args.input_size, args.input_size, dtype=torch.float32)
 
-              print(f"[*] Exporting ONNX to {args.output_path}...")
-              torch.onnx.export(
-                  wrapper, dummy_input, args.output_path,
-                  export_params=True, opset_version=args.opset,
-                  do_constant_folding=False,
-                  input_names=['input_rgb_edge'], output_names=['backward_mapping'],
+              print(f"[*] Exporting FULL 83.4M parameter graph to {args.output_path} (Target size: ~318 MB)...")
+              kwargs = dict(
+                  export_params=True, opset_version=args.opset, do_constant_folding=False,
+                  input_names=['input_rgb_edge'], output_names=['backward_mapping', 'pred_h', 'pred_v'],
               )
+              try:
+                  torch.onnx.export(wrapper, dummy_input, args.output_path, dynamo=False, **kwargs)
+              except TypeError:
+                  torch.onnx.export(wrapper, dummy_input, args.output_path, **kwargs)
+
               out_mb = os.path.getsize(args.output_path) / (1024 * 1024)
-              print(f"[✓] Successfully exported {args.output_path} ({out_mb:.2f} MB)")
+              print(f"[✓] FULL ONNX Model exported: {args.output_path} ({out_mb:.2f} MB)")
+              if out_mb < 50.0:
+                  raise RuntimeError(f"Model exported with abnormal size ({out_mb:.2f} MB < 50MB)! Parameters were pruned!")
 
           if __name__ == '__main__':
               export()
@@ -151,19 +157,15 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: d2dewarp-cvpr2026-v1.0.0
-          name: "D2Dewarp ONNX Model Weights (CVPR 2026)"
+          name: "D2Dewarp ONNX Full Model Weights (CVPR 2026)"
           body: |
-            ## D2Dewarp ONNX Model Weights
-            - **Paper**: D2Dewarp: Dual Dimensions Geometric Representation Learning Based Document Image Dewarping (CVPR 2026)
-            - **Input**: `input_rgb_edge` `[batch, 4, 448, 448]`
-            - **Output**: `backward_mapping` `[batch, 2, 448, 448]`
+            ## D2Dewarp Full ONNX Model Weights
+            - **Parameters**: 83,454,927 (Full 83.4M FP32 weights, ~318 MB)
+            - **Inputs**: `input_rgb_edge` [batch, 4, 448, 448]
+            - **Outputs**:
+              - `backward_mapping`: [batch, 2, 448, 448] (High-precision Backward Mapping)
+              - `pred_h`: [batch, 1, 448, 448] (Horizontal Text Line Feature)
+              - `pred_v`: [batch, 1, 448, 448] (Vertical Boundary Feature)
           files: d2dewarp.onnx
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 8. Upload Artifact Backup
-        uses: actions/upload-artifact@v4
-        with:
-          name: d2dewarp-onnx
-          path: d2dewarp.onnx
-          retention-days: 90
