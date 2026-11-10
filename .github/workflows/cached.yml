@@ -1,70 +1,147 @@
-name: Caxhed Flutter Build, Sign and Release
+name: Export D2Dewarp ONNX Model (CVPR 2026)
 
 on:
   workflow_dispatch:
-  #push:
-  #  branches:
-   #   - main
+    inputs:
+      custom_weight_url:
+        description: 'Direct download URL for model_weight.pt (Leave empty to fetch from Google Drive)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  export_and_commit:
+    name: Export ONNX and Commit Directly to Repo
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup Java
-        uses: actions/setup-java@v3
+      - name: 1. Checkout Repository
+        uses: actions/checkout@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
-                
-      - uses: subosito/flutter-action@v2
+          fetch-depth: 1
+
+      - name: 2. Set up Python 3.10
+        uses: actions/setup-python@v5
         with:
-          flutter-version: '3.24.0' 
-          channel: 'stable'
-          cache: true 
-          cache-key: ${{ runner.os }}-flutter-${{ hashFiles('**/pubspec.yaml') }}
-          
-      - run: flutter pub get
-      - name: Flutter Doctor
-        run: flutter doctor -v
+          python-version: '3.10'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-
-
-
-      # Cache build artifacts
-      - name: Cache Build Artifacts
-        uses: actions/cache@v3
-        with:
-          path: |
-            build/app/outputs/bundle/release/app-release.aab
-            build/app/outputs/apk/release/*.apk
-          key: ${{ runner.os }}-flutter-build-${{ hashFiles('**/pubspec.yaml') }}
-          restore-keys: |
-            ${{ runner.os }}-flutter-build-
-
-      # Build and Sign AAB and APKs using Flutter's built-in signing (with caching)
-      - name: Build and Sign AAB and APKs
-        if: steps.cache-build-artifacts.outputs.cache-hit != 'true' # Only build if cache miss
+      - name: 3. Install PyTorch and Export Dependencies
         run: |
-          flutter build appbundle -v 
-          flutter build apk --split-per-abi
+          python -m pip install --upgrade pip
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install onnx onnxruntime gdown thop opencv-python Pillow numpy
 
-      # Upload signed AAB and APKs as artifacts
-      - name: Upload Signed Artifacts
-        uses: actions/upload-artifact@v3
-        with:
-          name: signed-release-artifacts
-          path: |
-            build/app/outputs/bundle/release/app-release.aab
-            build/app/outputs/apk/release/*.apk
-
-      - name: Extract pubspec version
+      - name: 4. Ensure D2Dewarp Source Code
         run: |
-          echo "PUBSPEC_VERSION=$(grep -oP 'version:\s*\K[^+]+(?=\+)' pubspec.yaml)" >> $GITHUB_ENV
+          if [ -d "REF/scan/D2Dewarp" ]; then
+            echo "[*] Copying local D2Dewarp code..."
+            cp -r REF/scan/D2Dewarp/* .
+          elif [ ! -f "predict.py" ]; then
+            echo "[*] Cloning official D2Dewarp repository..."
+            git clone --depth 1 https://github.com/xiaomore/D2Dewarp.git d2dewarp_src
+            cp -r d2dewarp_src/* .
+          fi
+
+      - name: 5. Download Pre-trained Weights (model_weight.pt)
+        run: |
+          CUSTOM_URL="${{ github.event.inputs.custom_weight_url }}"
+          if [ -n "$CUSTOM_URL" ]; then
+            echo "[*] Downloading weights from: $CUSTOM_URL"
+            curl -L -o model_weight.pt "$CUSTOM_URL"
+          elif [ ! -f "model_weight.pt" ]; then
+            echo "[*] Downloading official D2Dewarp weights from Google Drive folder..."
+            gdown --folder "https://drive.google.com/drive/folders/1gv0lLaZWlUt1tX7EJDaVhtFhmV-ewQox" -O gdrive_weights
+            FOUND_FILE=$(find gdrive_weights -name "*.pt" -o -name "*.pth" | head -n 1)
+            if [ -n "$FOUND_FILE" ]; then
+              cp "$FOUND_FILE" ./model_weight.pt
+            fi
+          fi
+
+          if [ ! -f "model_weight.pt" ]; then
+            echo "::error::model_weight.pt not found."
+            exit 1
+          fi
+          ls -lh model_weight.pt
+
+      - name: 6. Run ONNX Export & Verification
+        run: |
+          cat << 'EOF' > export_onnx.py
+          import argparse, os, sys
+          import numpy as np, onnx, onnxruntime as ort, torch, torch.nn as nn
+          sys.path.insert(0, os.path.abspath("."))
+          from networks.d2dewarp_model import D2DewarpModel
+
+          class D2DewarpInferenceWrapper(nn.Module):
+              def __init__(self, base_model):
+                  super().__init__()
+                  self.base_model = base_model
+              def forward(self, x):
+                  pred_h_lst, pred_v_lst, bm_up = self.base_model(x)
+                  return bm_up, pred_h_lst[-1], pred_v_lst[-1]
+
+          def export():
+              parser = argparse.ArgumentParser()
+              parser.add_argument('--weight_path', default='model_weight.pt')
+              parser.add_argument('--output_path', default='d2dewarp.onnx')
+              parser.add_argument('--input_size', type=int, default=448)
+              parser.add_argument('--d_model', type=int, default=448)
+              parser.add_argument('--opset', type=int, default=17)
+              args = parser.parse_args()
+
+              base_model = D2DewarpModel(img_size=args.input_size, in_chans=4, hv_out_chans=1, d_model=args.d_model)
+              ckpt = torch.load(args.weight_path, map_location='cpu')
+              state_dict = ckpt.get('state_dict', ckpt)
+              base_model.load_state_dict({k.replace('module.', ''): v for k, v in state_dict.items()}, strict=True)
+              base_model.eval()
+
+              wrapper = D2DewarpInferenceWrapper(base_model)
+              dummy_input = torch.randn(1, 4, args.input_size, args.input_size, dtype=torch.float32)
+
+              torch.onnx.export(
+                  wrapper, dummy_input, args.output_path,
+                  export_params=True, opset_version=args.opset, do_constant_folding=True,
+                  input_names=['input_rgb_edge'], output_names=['backward_mapping', 'pred_h', 'pred_v'],
+                  dynamic_axes={'input_rgb_edge': {0: 'batch'}, 'backward_mapping': {0: 'batch'}}
+              )
+              onnx.checker.check_model(onnx.load(args.output_path))
+              sess = ort.InferenceSession(args.output_path, providers=['CPUExecutionProvider'])
+              res = sess.run(None, {'input_rgb_edge': dummy_input.numpy()})
+              print(f"[✓] Export and validation passed! Output shape: {res[0].shape}")
+
+          if __name__ == '__main__':
+              export()
+          EOF
+
+          python export_onnx.py --weight_path model_weight.pt --output_path d2dewarp.onnx
+          ls -lh d2dewarp.onnx
+
+      - name: 7. Commit and Push Directly to Repository
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          TARGET_DIR="packages/dewarp/pyro_dewarp_d2dewarp_ffi/test/assets"
+          mkdir -p "$TARGET_DIR"
+          cp d2dewarp.onnx "$TARGET_DIR/d2dewarp.onnx"
+
+          git add "$TARGET_DIR/d2dewarp.onnx"
+          if git diff --staged --quiet; then
+            echo "[*] Model already committed and up to date."
+          else
+            git commit -m "feat(dewarp): export and add D2Dewarp CVPR 2026 ONNX model weights"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "[✓] Successfully committed and pushed d2dewarp.onnx to repository!"
+          fi
+
+      - name: 8. Publish GitHub Release Asset
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: d2dewarp-cvpr2026-v1.0.0
+          name: "D2Dewarp ONNX Release (CVPR 2026 SOTA)"
+          files: d2dewarp.onnx
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
